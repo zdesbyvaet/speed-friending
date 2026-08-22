@@ -325,7 +325,7 @@ body.on-dark kbd{box-shadow:inset 0 0 0 1px rgba(240,234,220,.45)}
     <input type="checkbox" id="autoStart">
     <label for="autoStart" style="margin:0">Запускать таймер при переходе на вопрос</label>
   </div>
-  <small>Файлы никуда не загружаются — они читаются прямо из вашей папки. Пути к файлам можно также прописать в коде: блок <b>CONFIG.audio</b> в начале скрипта. Если сигнал не задан, звучит встроенный колокольчик.</small>
+  <small>Музыка берётся из файла <b>ambient.mp3</b> рядом с этой страницей — путь задан в блоке <b>CONFIG.audio</b> в начале скрипта. Поля ниже нужны, только если хочется подставить другие файлы на ходу. Если сигнал не задан, звучит встроенный колокольчик.</small>
 </div>
 
 <script>
@@ -339,25 +339,31 @@ const CONFIG = {
   autoStart: false,           // запускать таймер сразу при переходе на слайд
   warnSeconds: 30,            // за сколько секунд до конца менять цвет
   audio: {
-    chime:  '',               // напр. 'sounds/chime.mp3' — сигнал в конце
-    ambient:'',               // напр. 'sounds/ambient.mp3' — фон, играет по кругу
-    ambientVolume: 0.25       // 0…1
+    // Путь к музыке. Файл лежит рядом с этим html и называется ambient.mp3
+    // (можно и в подпапке — тогда пишите 'sounds/ambient.mp3').
+    ambient:'ambient.m4a',
+    ambientVolume: 0.25,      // 0…1
+    // Каждому вопросу достаётся свой четырёхминутный отрезок дорожки:
+    // вопрос 1 — с 0:00, вопрос 2 — с 4:00 и так далее.
+    // Когда дорожка кончается, отсчёт начинается сначала.
+    sliceByQuestion: true,
+    chime:  ''                // свой сигнал, напр. 'ding.mp3'. Пусто — встроенный колокольчик
   }
 };
 
 /* Вопросы. Порядок и текст можно менять — слайды соберутся сами. */
 const QUESTIONS = [
+  'Что тебя особенно вдохновляет и радует в израильском обществе?',
+  'Поделись мнением или убеждением, которое со временем изменилось. Как и почему это произошло?',
   'Какие темы в политической и общественной жизни Израиля тебя особенно интересуют? И почему?',
+  'Что в израильской политической системе до сих пор вызывает у тебя удивление или недоумение?',
+  'Обсуждаешь ли ты политику с друзьями или родственниками? Почему да, почему нет?',
   'Пишешь ли ты на политические или общественные темы у себя в соцсетях? Почему да, почему нет?',
   'Как ты обычно реагируешь, если политические взгляды собеседника не совпадают с твоими?',
   'Как ты отличаешь достоверную информацию от фейков в интернете? Поделись советами и рекомендациями.',
-  'Если бы тебе выпал шанс стать следующим премьер-министром, каким было бы твоё первое заявление?',
-  'Обсуждаешь ли ты политику с друзьями или родственниками? Почему да, почему нет?',
-  'Что тебя особенно вдохновляет и радует в израильском обществе?',
-  'Если бы завтра вы вдвоём могли принять в Кнессете новый закон — о чём бы он был?',
-  'Поделись мнением или убеждением, которое со временем изменилось. Как и почему это произошло?',
   '27 октября состоятся выборы в Кнессет. Какие ещё решения в израильском обществе, по-твоему, стоило бы принимать всеобщим голосованием?',
-  'Что в израильской политической системе до сих пор вызывает у тебя удивление или недоумение?',
+  'Если бы завтра вы вдвоём могли принять в Кнессете новый закон — о чём бы он был?',
+  'Если бы тебе выпал шанс стать следующим премьер-министром, каким было бы твоё первое заявление?',
   'Если бы домашние животные становились политиками — ты бы хотел(а) жить в государстве котов или собак? Или кого-то совсем другого?'
 ];
 
@@ -372,6 +378,7 @@ QUESTIONS.forEach((q, i) => {
   const cream = i % 2 === 0;
   const s = document.createElement('section');
   s.className = 'slide slide--q ' + (cream ? 't-cream' : 't-dark');
+  s.dataset.q = i;
   s.innerHTML = `
     <div class="eyebrow"><span>вопрос ${String(i + 1).padStart(2, '0')}</span><span class="of">из ${QUESTIONS.length}</span></div>
     <div class="q-grid">
@@ -405,36 +412,66 @@ const slides = [...document.querySelectorAll('.slide')];
 
 /* ---------- звук ---------- */
 const sound = {
-  chime: null, ambient: null, volume: CONFIG.audio.ambientVolume, ctx: null, fadeId: null,
+  chime: null, ambient: null, volume: CONFIG.audio.ambientVolume,
+  ctx: null, fadeId: null, pending: null, ready: false,
+
   setChime(src) { this.chime = new Audio(src); this.chime.preload = 'auto'; },
+
   setAmbient(src) {
     if (this.ambient) this.ambient.pause();
-    this.ambient = new Audio(src);
-    this.ambient.loop = true; this.ambient.preload = 'auto'; this.ambient.volume = this.volume;
+    this.ready = false;
+    const a = new Audio(src);
+    a.preload = 'auto';        // браузер начинает тянуть файл сразу при открытии
+    a.loop = false;
+    a.volume = 0;
+    a.addEventListener('loadedmetadata', () => {
+      this.ready = true;
+      if (this.pending !== null) { const s = this.pending; this.pending = null; this.seek(s); }
+    });
+    a.addEventListener('error', () => console.warn('Не удалось загрузить ' + src));
+    this.ambient = a;
   },
+
+  /* перемотка на отрезок этого вопроса */
+  seek(sec) {
+    const a = this.ambient;
+    if (!a) return;
+    if (!this.ready || !isFinite(a.duration) || !a.duration) { this.pending = sec; return; }
+    const usable = Math.max(1, a.duration - CONFIG.timerSeconds);
+    try { a.currentTime = sec % usable; } catch (e) {}
+  },
+
   startAmbient() {
-    if (!this.ambient) return;
+    const a = this.ambient; if (!a) return;
     clearInterval(this.fadeId);
-    this.ambient.volume = 0;
-    this.ambient.play().catch(() => {});
-    let v = 0;
+    a.play().catch(() => {});
+    let v = a.volume;
     this.fadeId = setInterval(() => {
       v = Math.min(this.volume, v + this.volume / 12);
-      this.ambient.volume = v;
+      a.volume = v;
       if (v >= this.volume) clearInterval(this.fadeId);
     }, 60);
   },
-  stopAmbient(fade = true) {
-    if (!this.ambient) return;
+
+  /* пауза с затуханием — позиция в дорожке сохраняется */
+  pauseAmbient(ms = 600) {
+    const a = this.ambient; if (!a) return;
     clearInterval(this.fadeId);
-    if (!fade) { this.ambient.pause(); this.ambient.currentTime = 0; return; }
-    let v = this.ambient.volume;
+    const step = this.volume / Math.max(1, ms / 60);
+    let v = a.volume;
     this.fadeId = setInterval(() => {
-      v = Math.max(0, v - this.volume / 10);
-      this.ambient.volume = v;
-      if (v <= 0) { clearInterval(this.fadeId); this.ambient.pause(); this.ambient.currentTime = 0; }
+      v = Math.max(0, v - step);
+      a.volume = v;
+      if (v <= 0) { clearInterval(this.fadeId); a.pause(); }
     }, 60);
   },
+
+  hardStop() {
+    const a = this.ambient; if (!a) return;
+    clearInterval(this.fadeId);
+    a.pause(); a.volume = 0;
+  },
+
   ring() {
     if (this.chime) {
       const a = this.chime.cloneNode();
@@ -444,18 +481,20 @@ const sound = {
     }
     this.beep();
   },
+
   beep() {
     try {
       this.ctx = this.ctx || new (window.AudioContext || window.webkitAudioContext)();
+      if (this.ctx.state === 'suspended') this.ctx.resume();
       const t0 = this.ctx.currentTime;
-      [[880, 0], [1108.7, .16], [1318.5, .32]].forEach(([f, d]) => {
+      [[1318.5, 0, 1.6], [1760, .18, 1.6], [2637, .36, 2.0]].forEach(([f, d, len]) => {
         const o = this.ctx.createOscillator(), g = this.ctx.createGain();
         o.type = 'sine'; o.frequency.value = f;
         g.gain.setValueAtTime(0.0001, t0 + d);
-        g.gain.exponentialRampToValueAtTime(0.35, t0 + d + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + d + 1.1);
+        g.gain.exponentialRampToValueAtTime(0.6, t0 + d + 0.015);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + d + len);
         o.connect(g).connect(this.ctx.destination);
-        o.start(t0 + d); o.stop(t0 + d + 1.2);
+        o.start(t0 + d); o.stop(t0 + d + len + 0.1);
       });
     } catch (e) {}
   }
@@ -465,6 +504,13 @@ if (CONFIG.audio.ambient) sound.setAmbient(CONFIG.audio.ambient);
 
 /* ---------- таймер ---------- */
 const T = { running: false, remain: CONFIG.timerSeconds * 1000, endAt: 0, done: false, raf: 0 };
+
+/* каждому вопросу — свои 4 минуты дорожки */
+function slotSeek() {
+  const q = slides[idx] && slides[idx].dataset.q;
+  if (q === undefined) return;
+  sound.seek(CONFIG.audio.sliceByQuestion ? (+q) * CONFIG.timerSeconds : 0);
+}
 
 function els() {
   const s = slides[idx];
@@ -510,18 +556,20 @@ function pause() {
   T.remain = Math.max(0, T.endAt - performance.now());
   T.running = false;
   cancelAnimationFrame(T.raf);
-  sound.stopAmbient(); paint();
+  sound.pauseAmbient(); paint();
 }
 function reset(silent) {
   T.running = false; T.done = false;
   T.remain = CONFIG.timerSeconds * 1000;
   cancelAnimationFrame(T.raf);
-  sound.stopAmbient(!silent); paint();
+  sound.hardStop(); slotSeek(); paint();
 }
 function finish() {
   T.running = false; T.done = true; T.remain = 0;
   cancelAnimationFrame(T.raf);
-  sound.ring(); sound.stopAmbient(); paint();
+  sound.pauseAmbient(200);   // музыка быстро уходит, чтобы сигнал было слышно
+  sound.ring();
+  paint();
 }
 function toggle() {
   if (T.done) { reset(true); start(); return; }
@@ -545,6 +593,7 @@ function show(n) {
   bar.style.backgroundColor = dark ? '#C7CC51' : '#EF454E';
   document.body.classList.toggle('on-dark', dark);
   count.textContent = (idx + 1) + ' / ' + slides.length;
+  slotSeek();
   paint();
   if (CONFIG.autoStart && slides[idx].classList.contains('slide--q')) start();
 }
@@ -578,7 +627,7 @@ document.getElementById('fChime').onchange = e => {
   if (e.target.files[0]) sound.setChime(URL.createObjectURL(e.target.files[0]));
 };
 document.getElementById('fAmb').onchange = e => {
-  if (e.target.files[0]) sound.setAmbient(URL.createObjectURL(e.target.files[0]));
+  if (e.target.files[0]) { sound.setAmbient(URL.createObjectURL(e.target.files[0])); slotSeek(); }
 };
 document.getElementById('vol').oninput = e => {
   sound.volume = e.target.value / 100;
